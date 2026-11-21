@@ -1,0 +1,15 @@
+{
+  "data_version": "demo-202506-v1",
+  "period": ["2025-06-19", "2025-06-22"],
+  "baseline": "mom",
+  "ecommerce": {
+    "metric": "gmv",
+    "negative_drivers": ["visits", "conversion", "aov"],
+    "events": ["promotion-618", "stockout-beauty"]
+  },
+  "fmcg": {
+    "metric": "net_margin",
+    "negative_drivers": ["materials", "commission"],
+    "events": ["materials-price", "commission-adjust"]
+  }
+}

@@ -1,0 +1,27 @@
+[project]
+name = "operationalattributionanalyticssystem"
+version = "0.1.0"
+description = "Operational attribution analysis API and demo data"
+readme = "README.md"
+authors = [
+    { name = "chaojipilipala", email = "745851718@qq.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb==2.0.1",
+    "fastapi>=0.165.0",
+    "httpx>=0.28.1",
+    "numpy>=2.5.5",
+    "openpyxl>=3.1.5",
+    "pandas>=3.1.1",
+    "pyjwt>=2.15.1",
+    "python-dotenv>=1.2.4",
+    "scipy>=1.18.1",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
