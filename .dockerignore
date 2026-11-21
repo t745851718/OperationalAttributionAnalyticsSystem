@@ -1,8 +1,12 @@
 **
 !backend/
 !backend/__init__.py
-!backend/catalog.py
-!backend/sandbox_worker.py
+!backend/models/
+!backend/models/__init__.py
+!backend/models/catalog.py
+!backend/services/
+!backend/services/__init__.py
+!backend/services/sandbox_worker.py
 !docker/
 !docker/sandbox.Dockerfile
 !docker/report.Dockerfile

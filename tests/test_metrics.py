@@ -2,8 +2,8 @@ import math
 
 import pytest
 
-from backend.catalog import METRICS
-from backend.metrics import decompose, shapley, validate_catalog
+from backend.models.catalog import METRICS
+from backend.models.metrics import decompose, shapley, validate_catalog
 
 CATALOG = {item["metric_id"]: item for item in METRICS}
 

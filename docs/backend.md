@@ -20,7 +20,7 @@
 
 响应中的 `id` 为会话 ID，`job_id` 和 `stream_url` 用于订阅任务。`GET /api/sessions/{id}` 返回分析规格、最新成功结果、历史提问及其任务 ID、进度状态与事件游标。`POST /api/sessions/{id}/messages` 接受 `{"content":"按渠道下钻，只分析信息流"}`，直接返回 SSE。可附 `Idempotency-Key` 重放同一请求。单会话同时运行一个任务。
 
-`GET /api/jobs/{id}/events` 通过 `Last-Event-ID` 或 `after` 重放比游标更新的消息。使用支持 Bearer 请求头的流式客户端。响应包含 `X-Analysis-Job-Id`。客户端断开后任务继续运行，进程重启后读取 SQLite 检查点。
+`GET /api/jobs/{id}/events` 通过 `Last-Event-ID` 或 `after` 重放比游标更新的消息。使用支持 Bearer 请求头的流式客户端。响应包含 `X-Analysis-Job-Id`。客户端断开后任务继续运行，进程重启后读取 PostgreSQL 检查点。
 
 | SSE 事件 | 内容 |
 | --- | --- |

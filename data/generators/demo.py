@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from itertools import product
 from random import Random
 
-from backend.catalog import DEMO_END, DEMO_START
+from backend.models.catalog import DEMO_END, DEMO_START
 
 DATA_VERSION = "demo-202506-v1"
 CHANNELS = {"ecommerce": ("信息流", "搜索", "会员"), "fmcg": ("商超", "经销", "直营")}

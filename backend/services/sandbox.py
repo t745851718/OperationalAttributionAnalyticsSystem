@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from backend.config import RUNTIME
-from backend.sandbox_worker import get_query
+from backend.services.sandbox_worker import get_query
 
 MAX_OUTPUT = 1_048_576
 
@@ -17,7 +17,7 @@ def evidence_code(request):
         "source": get_query(request["domain"], request["template"], request["filters"]),
         "parameters": {key: [*request[key], *request["filters"].values()]
                        for key in ("baseline", "current", "history")},
-        "executor": "backend.sandbox_worker.evaluate",
+        "executor": "backend.services.sandbox_worker.evaluate",
     }
 
 

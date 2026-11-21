@@ -45,7 +45,7 @@
 
 **4.5 What-If**：用历史数据回归估计弹性系数 `e=%ΔY/%Δx`，区间用 bootstrap（1000 次）；输出点估计+80% 区间，支持多情景对比。
 
-**4.6 沙箱安全**：只读数仓副本（DuckDB/SQLite）；Python 子进程，白名单库（pandas/numpy/scipy/statsmodels），禁网络与文件写；CPU 20s、内存 512MB、输出 1MB；SQL 仅 SELECT；所有代码与结果入审计。
+**4.6 沙箱安全**：只读数仓副本（DuckDB）；Python 子进程，白名单库（pandas/numpy/scipy/statsmodels），禁网络与文件写；CPU 20s、内存 512MB、输出 1MB；SQL 仅 SELECT；所有代码与结果入审计。
 
 ## 5. 数据模型（核心）
 | 表 | 关键字段 |
@@ -111,11 +111,11 @@
 - [ ] 至少两组预置场景完整闭环
 
 ## 12. 技术栈与目录
-后端 Python/FastAPI、ClickHouse、pandas/scipy/statsmodels；前端 Vue 3 + ECharts（瀑布/桑基/树图）；导出：WeasyPrint 或 Playwright（PDF）、openpyxl（Excel）。
+后端 Python/FastAPI、PostgreSQL 18、ClickHouse、pandas/scipy/statsmodels；前端 Vue 3 + ECharts（瀑布/桑基/树图）；导出：WeasyPrint 或 Playwright（PDF）、openpyxl（Excel）。
 
 ```
-├─ backend/ (api, planner, decomposer, sandbox, causal, simulator, report)
+├─ backend/ (controllers/, models/, services/, views/, migrations/, main.py)
 ├─ frontend/ (workbench, dashboard, events, dictionary, reports)
-├─ data/ (generators/, warehouse.duckdb, events.csv, expected_attribution.json)
+├─ data/ (generators/, expected_attribution.json)
 ├─ docs/ screenshots/  spec.md ui.md README.md
 ```

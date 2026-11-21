@@ -1,22 +1,25 @@
-import asyncio
-import logging
-from datetime import UTC, date, datetime
+from datetime import date
 from uuid import uuid4
 
 from fastapi import Depends, HTTPException, Query
 
-from backend import reports
-from backend.catalog import DIMENSIONS, DOMAIN_LABELS
-from backend.metrics import validate_catalog
-from backend.sandbox import verify
-from backend.schemas import (
-    BusinessLineInput, CommentInput, DataSourceInput, Domain, EventInput, MetricInput, ReportStatus,
-    RuntimeSettings, SubscriptionInput,
+from backend.models.catalog import DIMENSIONS, DOMAIN_LABELS
+from backend.models.metrics import validate_catalog
+from backend.models.schemas import (
+    BusinessLineInput,
+    CommentInput,
+    DataSourceInput,
+    Domain,
+    EventInput,
+    MetricInput,
+    ReportStatus,
+    RuntimeSettings,
+    SubscriptionInput,
 )
-from backend.store import dump, load, now
-from backend.warehouse import TABLES, Warehouse
-
-logger = logging.getLogger(__name__)
+from backend.models.store import dump, load, now
+from backend.models.warehouse import TABLES, Warehouse
+from backend.services.sandbox import verify
+from backend.views import reports
 
 
 def report_public(row, detail=False):
@@ -27,50 +30,6 @@ def report_public(row, detail=False):
     return result
 
 
-def refresh_digests(store):
-    timestamp = datetime.now(UTC)
-    with store.connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        subscriptions = db.execute("""
-            SELECT s.* FROM digest_subscription AS s JOIN user_account AS u
-            ON u.username=s.username WHERE u.role='manager'
-        """).fetchall()
-        for row in subscriptions:
-            start = datetime.fromisoformat(row["created_at"])
-            span = row["interval_days"] * 86400
-            period = int((timestamp - start).total_seconds() // span)
-            valid = db.execute("""
-                SELECT 1 FROM user_account AS u, json_each(u.domains) AS d
-                WHERE u.username=? AND d.value=?
-            """, (row["username"], row["domain_id"])).fetchone()
-            if not valid or db.execute("SELECT 1 FROM digest WHERE subscription_id=? AND period=?",
-                                       (row["id"], period)).fetchone():
-                continue
-            cutoff = datetime.fromtimestamp(timestamp.timestamp() - span, UTC).isoformat()
-            items = db.execute("""
-                SELECT r.id,r.title,r.version,r.updated_at,r.payload FROM report AS r
-                JOIN analysis_session AS a ON a.id=r.session_id
-                WHERE r.status='published' AND a.domain_id=? AND r.updated_at>=?
-                ORDER BY r.updated_at DESC LIMIT 20
-            """, (row["domain_id"], cutoff)).fetchall()
-            if not items:
-                continue
-            payload = [{"id": item["id"], "title": item["title"], "version": item["version"],
-                        "updated_at": item["updated_at"], "summary": load(item["payload"])["analysis"]["summary"]}
-                       for item in items]
-            db.execute("INSERT INTO digest VALUES (?,?,?,?,?)",
-                       (uuid4().hex, row["id"], period, dump(payload), timestamp.isoformat()))
-
-
-async def digest_loop(store):
-    while True:
-        try:
-            await asyncio.to_thread(refresh_digests, store)
-        except Exception:
-            logger.exception("Digest scheduling failed")
-        await asyncio.sleep(60)
-
-
 def management_routes(app, store, principal, authorize, report_for, warehouse_context):
     def require_admin(actor, domain=None):
         authorize(actor, domain, {"admin"})
@@ -79,14 +38,14 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
         authorize(actor, domain_id)
         allowed = [domain_id] if domain_id else actor["domains"]
         return [load(row["payload"]) for row in store.all(
-            f"SELECT payload FROM {table} WHERE domain_id IN ({','.join('?' for _ in allowed)})", allowed,
+            f"SELECT payload FROM {table} WHERE domain_id IN ({','.join('%s' for _ in allowed)})", allowed,
         )]
 
     @app.get("/api/dimensions")
     def dimensions(domain_id: Domain, actor=Depends(principal)):
         authorize(actor, domain_id)
         warehouse, version = warehouse_context()
-        from backend.catalog import DEMO_END, DEMO_START
+        from backend.models.catalog import DEMO_END, DEMO_START
         return [{"key": key, "name": label,
                  "values": [row[key] for row in warehouse.facts(
                      domain_id, version, DEMO_START, DEMO_END, group=(key,)
@@ -107,17 +66,17 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
         require_admin(actor, body.domain_id)
         result = {"event_id": event_id, **body.model_dump(mode="json"), "updated_at": now()}
         with store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
+            db.execute("LOCK TABLE biz_event IN SHARE ROW EXCLUSIVE MODE")
             if update:
-                row = db.execute("SELECT domain_id FROM biz_event WHERE event_id=?", (event_id,)).fetchone()
+                row = db.execute("SELECT domain_id FROM biz_event WHERE event_id=%s", (event_id,)).fetchone()
                 if not row:
                     raise HTTPException(404, "事件不存在")
                 require_admin(actor, row["domain_id"])
                 if row["domain_id"] != body.domain_id:
                     raise HTTPException(422, "事件所属指标域不可修改")
-                db.execute("UPDATE biz_event SET payload=? WHERE event_id=?", (dump(result), event_id))
+                db.execute("UPDATE biz_event SET payload=%s WHERE event_id=%s", (dump(result), event_id))
             else:
-                db.execute("INSERT INTO biz_event VALUES (?,?,?)", (event_id, body.domain_id, dump(result)))
+                db.execute("INSERT INTO biz_event VALUES (%s,%s,%s)", (event_id, body.domain_id, dump(result)))
             store.audit(actor["username"], "event.update" if update else "event.create", event_id, result, db)
         return result
 
@@ -133,12 +92,12 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
     def delete_event(event_id: str, actor=Depends(principal)):
         require_admin(actor)
         with store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT domain_id FROM biz_event WHERE event_id=?", (event_id,)).fetchone()
+            db.execute("LOCK TABLE biz_event IN SHARE ROW EXCLUSIVE MODE")
+            row = db.execute("SELECT domain_id FROM biz_event WHERE event_id=%s", (event_id,)).fetchone()
             if not row:
                 raise HTTPException(404, "事件不存在")
             require_admin(actor, row["domain_id"])
-            db.execute("DELETE FROM biz_event WHERE event_id=?", (event_id,))
+            db.execute("DELETE FROM biz_event WHERE event_id=%s", (event_id,))
             store.audit(actor["username"], "event.delete", event_id, db=db)
 
     @app.get("/api/metrics")
@@ -151,7 +110,7 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
         item = body.model_dump(mode="json", exclude_none=True)
         item["type"] = {"atomic": "atomic", "ratio": "derived"}.get(body.model, "composite")
         with store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
+            db.execute("LOCK TABLE metric_def IN SHARE ROW EXCLUSIVE MODE")
             catalog = {row["metric_id"]: load(row["payload"]) for row in db.execute("SELECT * FROM metric_def")}
             if update:
                 if identifier not in catalog:
@@ -166,7 +125,7 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
                 validate_catalog(catalog)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from None
-            db.execute("INSERT INTO metric_def VALUES (?,?,?) "
+            db.execute("INSERT INTO metric_def VALUES (%s,%s,%s) "
                        "ON CONFLICT(metric_id) DO UPDATE SET payload=excluded.payload",
                        (identifier, body.domain_id, dump(item)))
             store.audit(actor["username"], "metric.update" if update else "metric.create", identifier, item, db)
@@ -186,7 +145,7 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
     def delete_metric(metric_id: str, actor=Depends(principal)):
         require_admin(actor)
         with store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
+            db.execute("LOCK TABLE metric_def IN SHARE ROW EXCLUSIVE MODE")
             catalog = {row["metric_id"]: load(row["payload"]) for row in db.execute("SELECT * FROM metric_def")}
             removed = catalog.pop(metric_id, None)
             if not removed:
@@ -197,10 +156,10 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
             except ValueError:
                 raise HTTPException(409, "指标仍被其他公式引用") from None
             if db.execute("""
-                SELECT 1 FROM analysis_session WHERE json_extract(spec,'$.metric_id')=? LIMIT 1
+                SELECT 1 FROM analysis_session WHERE spec::jsonb->>'metric_id'=%s LIMIT 1
             """, (metric_id,)).fetchone():
                 raise HTTPException(409, "指标仍被分析会话引用")
-            db.execute("DELETE FROM metric_def WHERE metric_id=?", (metric_id,))
+            db.execute("DELETE FROM metric_def WHERE metric_id=%s", (metric_id,))
             store.audit(actor["username"], "metric.delete", metric_id, db=db)
 
     @app.get("/api/admin/settings")
@@ -212,7 +171,7 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
     def write_setting(actor, key, model):
         item = model.model_dump()
         with store.connect() as db:
-            db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, dump(item)))
+            db.execute("INSERT INTO settings VALUES (%s,%s) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload", (key, dump(item)))
             store.audit(actor["username"], "settings.update", key, item, db)
         return item
 
@@ -245,9 +204,9 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
         if set(actor["domains"]) != set(DOMAIN_LABELS):
             raise HTTPException(403, "全局审计需要全部指标域权限")
         if before is not None:
-            rows = store.all("SELECT * FROM audit_log WHERE id<? ORDER BY id DESC LIMIT ?", (before, limit))
+            rows = store.all("SELECT * FROM audit_log WHERE id<%s ORDER BY id DESC LIMIT %s", (before, limit))
         else:
-            rows = store.all("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
+            rows = store.all("SELECT * FROM audit_log ORDER BY id DESC LIMIT %s", (limit,))
         return [{**dict(row), "detail": load(row["detail"])} for row in rows]
 
     @app.post("/api/sandbox/run")
@@ -256,7 +215,7 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
         row = store.one("""
             SELECT audit_log.*, analysis_session.domain_id FROM audit_log
             JOIN analysis_session ON analysis_session.id=audit_log.target
-            WHERE audit_log.id=? AND action='sandbox.verify'
+            WHERE audit_log.id=%s AND action='sandbox.verify'
         """, (audit_id,))
         if not row:
             raise HTTPException(404, "验证记录不存在")
@@ -275,12 +234,12 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
         args = list(allowed)
         visibility = ""
         if actor["role"] != "admin":
-            visibility = " AND (report.status='published' OR analysis_session.owner=?)"
+            visibility = " AND (report.status='published' OR analysis_session.owner=%s)"
             args.append(actor["username"])
         rows = store.all(f"""
             SELECT report.*,analysis_session.domain_id,analysis_session.owner
             FROM report JOIN analysis_session ON analysis_session.id=report.session_id
-            WHERE analysis_session.domain_id IN ({','.join('?' for _ in allowed)}) {visibility}
+            WHERE analysis_session.domain_id IN ({','.join('%s' for _ in allowed)}) {visibility}
             ORDER BY report.updated_at DESC LIMIT 200
         """, args)
         return [report_public(row) for row in rows]
@@ -293,14 +252,14 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
     def publish(report_id: str, body: ReportStatus, actor=Depends(principal)):
         report_for(report_id, actor, write=True)
         with store.connect() as db:
-            db.execute("UPDATE report SET status=?,updated_at=? WHERE id=?", (body.status, now(), report_id))
+            db.execute("UPDATE report SET status=%s,updated_at=%s WHERE id=%s", (body.status, now(), report_id))
             store.audit(actor["username"], "report.status", report_id, body.model_dump(), db)
         return report_public(report_for(report_id, actor))
 
     @app.get("/api/reports/{report_id}/comments")
     def comments(report_id: str, actor=Depends(principal)):
         report_for(report_id, actor)
-        rows = store.all("SELECT * FROM comment WHERE report_id=? ORDER BY created_at", (report_id,))
+        rows = store.all("SELECT * FROM comment WHERE report_id=%s ORDER BY created_at", (report_id,))
         return [{**{key: row[key] for key in ("id", "author", "created_at")}, **load(row["payload"])} for row in rows]
 
     @app.post("/api/reports/{report_id}/comments", status_code=201)
@@ -310,21 +269,21 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
         if body.section not in reports.TITLES:
             raise HTTPException(422, "报告章节不存在")
         for username in body.mentions:
-            target = store.one("SELECT domains,role FROM user_account WHERE username=?", (username,))
+            target = store.one("SELECT domains,role FROM user_account WHERE username=%s", (username,))
             if not target or row["domain_id"] not in load(target["domains"]):
                 raise HTTPException(422, "被提及用户无此报告的指标域权限")
             if row["status"] != "published" and username != row["owner"] and target["role"] != "admin":
                 raise HTTPException(422, "被提及用户无此草稿的访问权限")
         identifier, stamp = uuid4().hex, now()
         with store.connect() as db:
-            db.execute("INSERT INTO comment VALUES (?,?,?,?,?)",
+            db.execute("INSERT INTO comment VALUES (%s,%s,%s,%s,%s)",
                        (identifier, report_id, actor["username"], body.model_dump_json(), stamp))
             store.audit(actor["username"], "report.comment", report_id, {"comment_id": identifier}, db)
         return {"id": identifier, "author": actor["username"], "created_at": stamp, **body.model_dump()}
 
     @app.get("/api/subscriptions")
     def subscriptions(actor=Depends(principal)):
-        rows = store.all("SELECT * FROM digest_subscription WHERE username=?", (actor["username"],))
+        rows = store.all("SELECT * FROM digest_subscription WHERE username=%s", (actor["username"],))
         return [dict(row) for row in rows if row["domain_id"] in actor["domains"]]
 
     @app.post("/api/subscriptions", status_code=201)
@@ -332,14 +291,14 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
         authorize(actor, body.domain_id, {"manager"})
         stamp, identifier = now(), uuid4().hex
         with store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM digest_subscription WHERE username=? AND domain_id=?",
+            db.execute("LOCK TABLE digest_subscription IN SHARE ROW EXCLUSIVE MODE")
+            row = db.execute("SELECT * FROM digest_subscription WHERE username=%s AND domain_id=%s",
                              (actor["username"], body.domain_id)).fetchone()
             if row and row["interval_days"] == body.interval_days:
                 return dict(row)
             if row:
-                db.execute("DELETE FROM digest_subscription WHERE id=?", (row["id"],))
-            db.execute("INSERT INTO digest_subscription VALUES (?,?,?,?,?)",
+                db.execute("DELETE FROM digest_subscription WHERE id=%s", (row["id"],))
+            db.execute("INSERT INTO digest_subscription VALUES (%s,%s,%s,%s,%s)",
                        (identifier, actor["username"], body.domain_id, body.interval_days, stamp))
             store.audit(actor["username"], "digest.subscribe", identifier, body.model_dump(), db)
         return {"id": identifier, **body.model_dump(), "created_at": stamp}
@@ -347,7 +306,7 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
     @app.delete("/api/subscriptions/{subscription_id}", status_code=204)
     def unsubscribe(subscription_id: str, actor=Depends(principal)):
         with store.connect() as db:
-            changed = db.execute("DELETE FROM digest_subscription WHERE id=? AND username=?",
+            changed = db.execute("DELETE FROM digest_subscription WHERE id=%s AND username=%s",
                                  (subscription_id, actor["username"])).rowcount
             if not changed:
                 raise HTTPException(404, "订阅不存在")
@@ -358,7 +317,7 @@ def management_routes(app, store, principal, authorize, report_for, warehouse_co
         authorize(actor, roles={"manager"})
         rows = store.all("""
             SELECT d.*,s.domain_id FROM digest AS d JOIN digest_subscription AS s ON d.subscription_id=s.id
-            WHERE s.username=? ORDER BY d.created_at DESC LIMIT 50
+            WHERE s.username=%s ORDER BY d.created_at DESC LIMIT 50
         """, (actor["username"],))
         published = {row["id"] for row in store.all("SELECT id FROM report WHERE status='published'")}
         return [{**dict(row), "payload": [item for item in load(row["payload"]) if item["id"] in published]}

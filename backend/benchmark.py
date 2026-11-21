@@ -2,10 +2,10 @@
 
 from time import perf_counter
 
-from backend.analysis import demo_spec, drilldown
-from backend.catalog import METRICS
-from backend.metrics import decompose
-from backend.warehouse import Warehouse
+from backend.services.analysis import demo_spec, drilldown
+from backend.models.catalog import METRICS
+from backend.models.metrics import decompose
+from backend.models.warehouse import Warehouse
 
 SQL = """
     SELECT

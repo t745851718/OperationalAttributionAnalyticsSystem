@@ -5,7 +5,7 @@ from functools import cache
 from itertools import permutations
 from random import Random
 
-from backend.catalog import FACT_FIELDS
+from backend.models.catalog import FACT_FIELDS
 
 OPERATORS = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
 MUL = (ast.Mult, ast.Div)

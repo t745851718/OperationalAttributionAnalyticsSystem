@@ -1,18 +1,18 @@
 import asyncio
 import logging
-import sqlite3
+from psycopg.errors import UniqueViolation
 from datetime import timedelta
 from uuid import uuid4
 
 import httpx
 
-from backend.analysis import AnalysisError, actions, drilldown, event_matches, get_decomposition, plan, training_data, window_rows
-from backend.model import ModelError, object_schema
-from backend.sandbox import evidence_code, verify
-from backend.sandbox_worker import TEMPLATES
-from backend.schemas import AnalysisSpec, Planned, RuntimeSettings
-from backend.store import dump, load, now
-from backend.warehouse import Warehouse, baseline_period
+from backend.services.analysis import AnalysisError, actions, drilldown, event_matches, get_decomposition, plan, training_data, window_rows
+from backend.services.llm_client import ModelError, object_schema
+from backend.services.sandbox import evidence_code, verify
+from backend.services.sandbox_worker import TEMPLATES
+from backend.models.schemas import AnalysisSpec, Planned, RuntimeSettings
+from backend.models.store import dump, load, now
+from backend.models.warehouse import Warehouse, baseline_period
 
 logger = logging.getLogger(__name__)
 TERMINAL = {"complete", "failed", "cancelled"}
@@ -42,16 +42,16 @@ class Jobs:
 
     @staticmethod
     def emit(db, job_id, event, payload):
-        db.execute("INSERT INTO job_event(job_id,type,payload) VALUES (?,?,?)",
+        db.execute("INSERT INTO job_event(job_id,type,payload) VALUES (%s,%s,%s)",
                    (job_id, event, dump(payload)))
 
     def create(self, session_id, username, question, request_key=None, db=None):
         if db is None:
             with self.store.connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
                 return self.create(session_id, username, question, request_key, connection)
+        db.execute("SELECT id FROM analysis_session WHERE id=%s FOR UPDATE", (session_id,))
         if request_key:
-            existing = db.execute("SELECT id,question FROM job WHERE session_id=? AND request_key=?",
+            existing = db.execute("SELECT id,question FROM job WHERE session_id=%s AND request_key=%s",
                                   (session_id, request_key)).fetchone()
             if existing:
                 if existing["question"] != question:
@@ -61,19 +61,19 @@ class Jobs:
         try:
             db.execute("""
                 INSERT INTO job(id,session_id,question,request_key,status,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
             """, (identifier, session_id, question, request_key, "queued", timestamp, timestamp))
-        except sqlite3.IntegrityError as exc:
+        except UniqueViolation as exc:
             raise AnalysisError("此会话已有进行中的分析") from exc
-        db.execute("UPDATE analysis_session SET status='queued',updated_at=? WHERE id=?", (timestamp, session_id))
+        db.execute("UPDATE analysis_session SET status='queued',updated_at=%s WHERE id=%s", (timestamp, session_id))
         self.emit(db, identifier, "plan", {"status": "queued", "job_id": identifier, "steps": STEPS})
         self.store.audit(username, "analysis.queued", session_id, {"job_id": identifier}, db)
         return identifier
 
     def retry(self, job, username):
         with self.store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            latest = db.execute("SELECT id FROM job WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
+            db.execute("SELECT id FROM analysis_session WHERE id=%s FOR UPDATE", (job["session_id"],))
+            latest = db.execute("SELECT id FROM job WHERE session_id=%s ORDER BY created_at DESC LIMIT 1",
                                 (job["session_id"],)).fetchone()
             if job["status"] != "failed" or latest["id"] != job["id"]:
                 raise AnalysisError("仅可重试会话中最近一次失败的分析")
@@ -81,7 +81,7 @@ class Jobs:
             checkpoints = (load(job["result"]) or {}).get("verified", {})
             verified = {key: item for key, item in checkpoints.items()
                         if item["status"] not in {"timeout", "error"}}
-            db.execute("UPDATE job SET context=?,plan=?,result=? WHERE id=?",
+            db.execute("UPDATE job SET context=%s,plan=%s,result=%s WHERE id=%s",
                        (job["context"], job["plan"], dump({"verified": verified}), identifier))
             self.store.audit(username, "analysis.retry", job["session_id"],
                              {"original_job_id": job["id"], "job_id": identifier}, db)
@@ -117,21 +117,21 @@ class Jobs:
         identifier, session_id = job["id"], job["session_id"]
         with self.store.connect() as db:
             updated = db.execute("""
-                UPDATE job SET status=?,updated_at=? WHERE id=? AND status IN ('queued','running')
+                UPDATE job SET status=%s,updated_at=%s WHERE id=%s AND status IN ('queued','running')
             """, (status, stamp, identifier)).rowcount
             if not updated:
                 return False
             if status == "complete":
-                db.execute("UPDATE job SET result=? WHERE id=?", (dump(result), identifier))
+                db.execute("UPDATE job SET result=%s WHERE id=%s", (dump(result), identifier))
                 db.execute("""
-                    UPDATE analysis_session SET status=?, updated_at=?, spec=?, result=?, title=? WHERE id=?
+                    UPDATE analysis_session SET status=%s, updated_at=%s, spec=%s, result=%s, title=%s WHERE id=%s
                 """, (status, stamp, dump(result["spec"]), dump(result), result["decomposition"]["name"], session_id))
                 self.emit(db, identifier, "conclusion", result)
             else:
-                db.execute("UPDATE analysis_session SET status=?,updated_at=? WHERE id=?",
+                db.execute("UPDATE analysis_session SET status=%s,updated_at=%s WHERE id=%s",
                            (status, stamp, session_id))
             self.emit(db, identifier, status, {"status": status, "job_id": identifier, **info})
-            subject = user or db.execute("SELECT owner FROM analysis_session WHERE id=?", (session_id,)).fetchone()[0]
+            subject = user or db.execute("SELECT owner FROM analysis_session WHERE id=%s", (session_id,)).fetchone()["owner"]
             self.store.audit(subject, f"analysis.{status}", session_id, {"job_id": identifier, **info}, db)
         return True
 
@@ -142,13 +142,13 @@ class Jobs:
     async def run(self, identifier):
         async with self.slots:
             with self.store.connect() as db:
-                job = db.execute("SELECT * FROM job WHERE id=?", (identifier,)).fetchone()
+                job = db.execute("SELECT * FROM job WHERE id=%s FOR UPDATE", (identifier,)).fetchone()
                 if job is None or job["status"] in TERMINAL:
                     return
-                db.execute("UPDATE job SET status='running',updated_at=? WHERE id=?", (now(), identifier))
-                db.execute("UPDATE analysis_session SET status='running',updated_at=? WHERE id=?",
+                db.execute("UPDATE job SET status='running',updated_at=%s WHERE id=%s", (now(), identifier))
+                db.execute("UPDATE analysis_session SET status='running',updated_at=%s WHERE id=%s",
                            (now(), job["session_id"]))
-                session = db.execute("SELECT * FROM analysis_session WHERE id=?", (job["session_id"],)).fetchone()
+                session = db.execute("SELECT * FROM analysis_session WHERE id=%s", (job["session_id"],)).fetchone()
             try:
                 async with asyncio.timeout(240):
                     result = await self.execute(job, session)
@@ -178,10 +178,10 @@ class Jobs:
                 "settings": self.store.setting("runtime", {}),
                 "inherited": load(session["spec"]),
                 "events": [load(row["payload"]) for row in self.store.all(
-                    "SELECT payload FROM biz_event WHERE domain_id=?", (domain,)
+                    "SELECT payload FROM biz_event WHERE domain_id=%s", (domain,)
                 )],
             }
-            self.store.write("UPDATE job SET context=? WHERE id=?", (dump(context), identifier))
+            self.store.write("UPDATE job SET context=%s WHERE id=%s", (dump(context), identifier))
         catalog, version = context["catalog"], context["version"]
         warehouse = Warehouse(context["source"])
         settings = RuntimeSettings.model_validate(context["settings"])
@@ -193,7 +193,7 @@ class Jobs:
             selected = await plan(self.model, warehouse, catalog, domain, version, job["question"],
                                   inherited, settings.model_max_tokens)
             with self.store.connect() as db:
-                db.execute("UPDATE job SET plan=? WHERE id=?", (selected.model_dump_json(), identifier))
+                db.execute("UPDATE job SET plan=%s WHERE id=%s", (selected.model_dump_json(), identifier))
                 self.emit(db, identifier, "plan",
                           {"status": "planned", "job_id": identifier, **selected.model_dump(mode="json")})
         spec = selected.spec
@@ -241,7 +241,7 @@ class Jobs:
                     "elapsed_ms": round((asyncio.get_running_loop().time() - start) * 1000)}
             checked[ref] = item
             with self.store.connect() as db:
-                db.execute("UPDATE job SET result=? WHERE id=?", (dump({"verified": checked}), identifier))
+                db.execute("UPDATE job SET result=%s WHERE id=%s", (dump({"verified": checked}), identifier))
                 self.emit(db, identifier, "hypothesis", item)
                 self.store.audit(session["owner"], "sandbox.verify", session["id"],
                                  {"job_id": identifier, "input": request, "evidence": item}, db)

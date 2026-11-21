@@ -10,7 +10,7 @@ import duckdb
 import numpy as np
 from scipy import stats
 
-from backend.catalog import DIMENSIONS, FACT_FIELDS
+from backend.models.catalog import DIMENSIONS, FACT_FIELDS
 
 TEMPLATES = {
     "ecommerce": {

@@ -7,12 +7,12 @@ from random import Random
 
 import numpy as np
 
-from backend.catalog import DEMO_END, DEMO_START, DIMENSIONS, FACT_FIELDS
-from backend.metrics import Evaluator, decompose, divide, shapley
-from backend.model import ModelError, object_schema
-from backend.sandbox_worker import TEMPLATES
-from backend.schemas import AnalysisSpec, Planned
-from backend.warehouse import baseline_period
+from backend.models.catalog import DEMO_END, DEMO_START, DIMENSIONS, FACT_FIELDS
+from backend.models.metrics import Evaluator, decompose, divide, shapley
+from backend.services.llm_client import ModelError, object_schema
+from backend.services.sandbox_worker import TEMPLATES
+from backend.models.schemas import AnalysisSpec, Planned
+from backend.models.warehouse import baseline_period
 
 DRIVER_ACTIONS = {
     "visits": ("调整高转化渠道预算与投放节奏", "投放经理", 7),

@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 import httpx
 
-from backend.catalog import DIMENSIONS, DOMAIN_LABELS, FACT_FIELDS
+from backend.models.catalog import DIMENSIONS, DOMAIN_LABELS, FACT_FIELDS
 
 TABLES = {"ecommerce": "attribution_fact_orders", "fmcg": "attribution_fact_cost"}
 
