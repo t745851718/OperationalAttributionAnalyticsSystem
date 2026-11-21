@@ -2,7 +2,7 @@
 
 从指标异动大盘发现异常，在三栏工作台拆解驱动因子的贡献，通过统计检验和业务事件复核归因假设，再用 What-If 情景对比评估策略并导出报告。
 
-![dashboard.png](job-review/dashboard.png)
+![dashboard.png](images/dashboard.png)
 
 ## 交付内容
 
